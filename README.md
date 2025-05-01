@@ -1,8 +1,10 @@
 # guicourse_to_fiftyone
 Parsing the datasets from GUICourse to FiftyOne format
 
+Clone the following repositories:
 
-
+- https://huggingface.co/datasets/yiye2023/GUIAct
+- https://huggingface.co/datasets/yiye2023/GUIEnv
 
 # Citation
 ```bibtex
