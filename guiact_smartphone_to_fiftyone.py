@@ -258,7 +258,7 @@ def create_dataset(df, processed_json: List[Dict],  dataset_name: str = "guiact_
         if 'actions_label' in json_item:
             _, keypoints = process_action_label(json_item['actions_label'])
             if keypoints is not None:
-                sample['action_label'] = keypoints
+                sample['action'] = keypoints
         
         samples.append(sample)
     
@@ -275,4 +275,3 @@ def create_dataset(df, processed_json: List[Dict],  dataset_name: str = "guiact_
     dataset.save()
 
     return dataset
-
