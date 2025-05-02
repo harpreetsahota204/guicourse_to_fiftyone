@@ -8,7 +8,6 @@ from PIL import Image
 import io
 
 
-
 def save_base64_image(base64_str: str, save_dir: str, image_name: str) -> str:
     """
     Convert and save a base64-encoded image string to a JPEG file on disk.
@@ -189,6 +188,43 @@ def process_action_labels(action_labels):
         
     return result
 
+def create_structured_history(actions_label):
+    """
+    Convert actions_label list into a structured_history list of strings.
+    
+    Args:
+        actions_label: List of action dictionaries
+        
+    Returns:
+        list: Structured history as list of strings
+    """
+    history = []
+    
+    for action in actions_label:
+        name = action.get('name')
+        
+        if name == 'scroll':
+            y = float(action.get('scroll', {}).get('related', {}).get('down', 0))
+            direction = 'down' if y > 0 else 'up'
+            history.append(f'scroll: {direction}')
+            
+        elif name == 'answer':
+            text = action.get('text', '')
+            history.append(f'answer: {text}')
+            
+        elif name in ['click', 'select']:
+            box = action.get('element', {}).get('related', '')
+            history.append(f'{name}: {box}')
+            
+        elif name == 'input':
+            text = action.get('text', '')
+            history.append(f'input: {text}')
+            
+        elif name == 'enter':
+            history.append('enter')
+            
+    return history
+
 def create_dataset(df, json_data: List[Dict], dataset_name: str = "guiact_websingle_test") -> fo.Dataset:
     """
     Create a FiftyOne dataset from DataFrame and JSON data containing UI interactions.
@@ -240,6 +276,8 @@ def create_dataset(df, json_data: List[Dict], dataset_name: str = "guiact_websin
             for field_name, objects in action_objects.items():
                 sample[f'action_{field_name}'] = objects
         
+        if 'actions_label' in json_item:
+            sample['structured_history'] = create_structured_history(json_item['actions_label'])
         samples.append(sample)
     dataset.add_samples(samples, dynamic=True)
     dataset.compute_metadata()
