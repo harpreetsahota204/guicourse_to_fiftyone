@@ -8,7 +8,7 @@ from PIL import Image
 import io
 
 
-def save_base64_image(base64_str: str, save_dir: str, image_name: str) -> str:
+def save_base64_image(base64_str: str, save_dir: str, image_name: str) -> Tuple[str, Dict[str, int]]:
     """
     Convert and save a base64-encoded image string to a JPEG file on disk.
     
@@ -18,7 +18,7 @@ def save_base64_image(base64_str: str, save_dir: str, image_name: str) -> str:
         image_name: Name to use for the saved image file (without extension)
         
     Returns:
-        str: Full filepath where the image was saved
+        Tuple[str, Dict[str, int]]: Filepath where image was saved and dictionary with image dimensions
     """
     # Create directory if it doesn't exist
     Path(save_dir).mkdir(parents=True, exist_ok=True)
@@ -33,8 +33,12 @@ def save_base64_image(base64_str: str, save_dir: str, image_name: str) -> str:
     filepath = os.path.join(save_dir, f"{image_name}.jpg")
     img.save(filepath, 'JPEG')
     
-    return filepath
+    # Get actual image dimensions
+    image_size = {'width': img.width, 'height': img.height}
+    
+    return filepath, image_size
 
+    
 def normalize_ui_element(element: Dict, image_width: int, image_height: int) -> Dict:
     """
     Normalize UI element coordinates from pixel values to [0,1] range and format for FiftyOne.
@@ -50,16 +54,15 @@ def normalize_ui_element(element: Dict, image_width: int, image_height: int) -> 
     rect = element['rect']
     
     # Convert pixel coordinates to normalized [0,1] range
-    x = rect['left'] / image_width
-    y = rect['top'] / image_height
-    width = (rect['right'] - rect['left']) / image_width
-    height = (rect['bottom'] - rect['top']) / image_height
+    x = rect['x'] / image_width
+    y = rect['y'] / image_height
+    width = rect['width'] / image_width
+    height = rect['height'] / image_height
     
     return {
         'bounding_box': [x, y, width, height],
-        'label': 'ui_element',
+        'label': str(element.get('uid', '')),
         'text': element.get('text', ''),
-        'uid': element.get('uid', '')
     }
 
 def parse_normalized_box_string(box_str: str) -> List[float]:
@@ -122,7 +125,6 @@ def process_ui_elements(elements_str, image_size: Dict) -> fo.Detections:
             bounding_box=normalized['bounding_box'],
             label=normalized['label'],
             text=normalized['text'],
-            uid=normalized['uid']
         )
         ui_elements.append(detection)
     
@@ -144,7 +146,7 @@ def process_action_labels(action_labels):
     keypoints = []   # for scroll
     classifications = []  # for answer, enter
     
-    for action in action_labels:
+    for idx, action in enumerate(action_labels):
         # Safely get the action name
         name = action.get('name')
         
@@ -152,6 +154,7 @@ def process_action_labels(action_labels):
         if name in ['click', 'input', 'select']:
             detection = fo.Detection(
                 label=name,
+                order=idx,
                 bounding_box=parse_normalized_box_string(action.get('element', {}).get('related')),
                 text=action.get('text')  # Will be None if not present
             )
@@ -164,16 +167,16 @@ def process_action_labels(action_labels):
             
             keypoint = fo.Keypoint(
                 label='scroll',
+                order=idx,
                 points=[[1.0, abs(y)]],  # Place at right edge of image
                 direction= 'up' if y < 0 else 'down',
             )
             keypoints.append(keypoint)
             
-        # Handle classification actions (answer, enter)
-        elif name in ['answer', 'enter']:
+        # Handle classification actions (answer)
+        elif name in ['answer']:
             classification = fo.Classification(
-                label=name,
-                text=action.get('text')  # Get any associated text
+                label=action.get('text')
             )
             classifications.append(classification)
     
@@ -228,57 +231,62 @@ def create_structured_history(actions_label):
 def create_dataset(df, json_data: List[Dict], dataset_name: str = "guiact_websingle_test") -> fo.Dataset:
     """
     Create a FiftyOne dataset from DataFrame and JSON data containing UI interactions.
-    
-    Creates a dataset with:
-    - Images saved from base64 strings
-    - UI elements as Detections
-    - Click/select/input actions as Detections
-    - Scroll actions as Keypoints
-    - Associated metadata (image_id, question)
+    Each image from the DataFrame may have multiple associated JSON entries (identified by unique UIDs).
+    The function creates separate samples for each unique UID, saving duplicate images when necessary.
     
     Args:
-        df: DataFrame containing image data and UI elements
-        json_data: List of dictionaries with metadata and action labels
+        df: DataFrame containing image data (base64) and UI elements
+        json_data: List of dictionaries containing metadata, questions, and action labels
         dataset_name: Name for the FiftyOne dataset
         
     Returns:
-        fo.Dataset: Created FiftyOne dataset with all samples
+        fo.Dataset: Created FiftyOne dataset containing all samples, with images saved using UIDs
     """
     dataset = fo.Dataset(name=dataset_name, overwrite=True)
     
-    # Create lookup map using image_id
-    json_map = {item['image_id']: item for item in json_data}
-    samples = []
+    # Create mapping of image_id to list of JSON items since one image may have multiple questions/actions
+    json_map = {}
+    for item in json_data:
+        image_id = item['image_id']
+        if image_id not in json_map:
+            json_map[image_id] = []
+        json_map[image_id].append(item)
     
+    samples = []
     for _, row in df.iterrows():
-        image_id = row['index']  # DataFrame index contains image_id
-        json_item = json_map.get(image_id)
+        image_id = row['index']
+        json_items = json_map.get(image_id, [])
         
-        if not json_item:
+        # Skip if no JSON entries found for this image
+        if not json_items:
             continue
+        
+        # Create a separate sample for each JSON entry (question/action) associated with this image
+        for json_item in json_items:
+            # Use UID as filename to ensure unique identification of each question/action instance
+            uid = json_item['uid']
+            filepath, image_size = save_base64_image(row['base64'], dataset_name, uid)
             
-        # Save base64 image to disk
-        filepath = save_base64_image(row['base64'], dataset_name, image_id)
-        
-        # Create sample with metadata
-        sample = fo.Sample(
-            filepath=filepath,
-            image_id=json_item['image_id'],
-            question=json_item['question']
-        )
-        
-        # Add UI elements
-        sample['ui_elements'] = process_ui_elements(row['elements'], json_item['image_size'])
-        
-        # Add action label if present
-        if 'actions_label' in json_item:
-            action_objects = process_action_labels(json_item['actions_label'])
-            for field_name, objects in action_objects.items():
-                sample[f'action_{field_name}'] = objects
-        
-        if 'actions_label' in json_item:
-            sample['structured_history'] = create_structured_history(json_item['actions_label'])
-        samples.append(sample)
+            # Create sample with basic metadata
+            sample = fo.Sample(
+                filepath=filepath,
+                image_id=json_item['image_id'],
+                uid=uid,
+                question=json_item['question']
+            )
+            
+            # Add UI element detections from the DataFrame
+            sample['ui_elements'] = process_ui_elements(row['elements'], image_size)
+            
+            # Process and add action labels if present in JSON
+            if 'actions_label' in json_item:
+                action_objects = process_action_labels(json_item['actions_label'])
+                for field_name, objects in action_objects.items():
+                    sample[f'action_{field_name}'] = objects
+                sample['structured_history'] = create_structured_history(json_item['actions_label'])
+            
+            samples.append(sample)
+    
     dataset.add_samples(samples, dynamic=True)
     dataset.compute_metadata()
     return dataset
